@@ -2,6 +2,7 @@
 PROJECT_BRIEF.md
 
 # secrets
+secrets/
 .env
 .env.*
 !.env*.example

@@ -38,14 +38,20 @@ def month_bounds(month: str) -> tuple[date, date]:
 
 
 def set_billing_period(wh: Warehouse, month: str) -> None:
+    """(Re)create the one-row, session-scoped table the monthly SQL reads.
+
+    Call it OUTSIDE wh.transaction(): in Snowflake a DDL statement (CREATE)
+    commits the open transaction, which would break the atomic delete+insert.
+    Create-then-insert instead of CREATE ... AS SELECT ?: plain INSERT is the
+    most portable way to bind parameters.
+    """
     start, end = month_bounds(month)
     created_at = datetime.now(UTC).replace(tzinfo=None, microsecond=0)
     wh.execute(
-        "CREATE OR REPLACE TEMPORARY TABLE billing_period AS SELECT "
-        "CAST(? AS VARCHAR) AS month_label, CAST(? AS DATE) AS period_start, "
-        "CAST(? AS DATE) AS period_end, CAST(? AS TIMESTAMP) AS created_at",
-        [month, start, end, created_at],
+        "CREATE OR REPLACE TEMPORARY TABLE billing_period ("
+        "month_label VARCHAR, period_start DATE, period_end DATE, created_at TIMESTAMP)"
     )
+    wh.execute("INSERT INTO billing_period VALUES (?, ?, ?, ?)", [month, start, end, created_at])
 
 
 def check_month_complete(wh: Warehouse, month: str) -> None:
@@ -83,8 +89,8 @@ def check_month_complete(wh: Warehouse, month: str) -> None:
 def create_invoices(wh: Warehouse, month: str) -> int:
     check_month_complete(wh, month)
     start, _ = month_bounds(month)
+    set_billing_period(wh, month)
     with wh.transaction():
-        set_billing_period(wh, month)
         wh.execute("DELETE FROM invoices WHERE invoice_month = ?", [start])
         wh.run("monthly/create_invoices")
     return wh.scalar("SELECT COUNT(*) FROM invoices WHERE invoice_month = ?", [start])
@@ -93,8 +99,8 @@ def create_invoices(wh: Warehouse, month: str) -> int:
 def create_partner_statements(wh: Warehouse, month: str) -> int:
     check_month_complete(wh, month)
     start, _ = month_bounds(month)
+    set_billing_period(wh, month)
     with wh.transaction():
-        set_billing_period(wh, month)
         wh.execute("DELETE FROM partner_statements WHERE statement_month = ?", [start])
         wh.run("monthly/create_partner_statements")
     return wh.scalar("SELECT COUNT(*) FROM partner_statements WHERE statement_month = ?", [start])

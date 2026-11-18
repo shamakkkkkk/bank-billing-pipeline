@@ -80,6 +80,7 @@ services:
       SAVEHUB_SEEDS_DIR: /opt/airflow/seeds
       WAREHOUSE: ${WAREHOUSE:-duckdb}
       DUCKDB_PATH: /opt/airflow/data/warehouse.duckdb
+      SNOWFLAKE_PRIVATE_KEY_PATH: /opt/airflow/secrets/snowflake_key.p8
     ports:
       - "8080:8080"
     volumes:
@@ -89,6 +90,7 @@ services:
       - ./seeds:/opt/airflow/seeds
       - ./logs:/opt/airflow/logs
       - ./scripts:/opt/airflow/scripts
+      - ./secrets:/opt/airflow/secrets:ro  # Snowflake private key (git-ignored)
       - ./data:/opt/airflow/data  # warehouse.duckdb lives here, readable from your laptop
     depends_on:
       postgres:

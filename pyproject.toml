@@ -8,6 +8,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "boto3>=1.35",
     "duckdb>=1.1",
+    "snowflake-connector-python>=3.12",
 ]
 
 [dependency-groups]
@@ -29,8 +30,11 @@ testpaths = ["tests"]
 # The Lambda is a standalone file (it is zipped alone), so put its folder on the path.
 pythonpath = ["lambdas/validate_bank_file", "tests"]
 # Integration tests need the running docker stack: uv run pytest -m integration
-addopts = "-m 'not integration'"
-markers = ["integration: needs docker compose (LocalStack) running"]
+addopts = "-m 'not integration and not snowflake'"
+markers = [
+    "integration: needs docker compose (LocalStack) running",
+    "snowflake: runs against a real Snowflake account (uses credits; needs .env)",
+]
 
 [tool.ruff]
 line-length = 100

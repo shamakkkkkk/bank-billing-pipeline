@@ -105,11 +105,69 @@ class DuckDBWarehouse(Warehouse):
         self.con.close()
 
 
+class SnowflakeWarehouse(Warehouse):
+    """Snowflake, authenticated with a key pair (no password: service users
+    cannot use passwords, and the key never leaves the machine running the
+    pipeline). Settings come from the environment, see .env.example.
+
+    Snowflake specifics handled here, so the rest of the code does not care:
+    - paramstyle="qmark": server-side binding of `?`, same SQL as DuckDB
+    - transactions are explicit BEGIN / COMMIT / ROLLBACK
+    - DDL inside a transaction would commit it: callers keep CREATE outside
+    """
+
+    def __init__(self, schema: str | None = None, **overrides):
+        import snowflake.connector
+
+        env = os.environ
+        params = {
+            "account": env["SNOWFLAKE_ACCOUNT"],
+            "user": env["SNOWFLAKE_USER"],
+            "authenticator": "SNOWFLAKE_JWT",
+            "private_key_file": env["SNOWFLAKE_PRIVATE_KEY_PATH"],
+            "role": env.get("SNOWFLAKE_ROLE", "SAVEHUB_PIPELINE"),
+            "warehouse": env.get("SNOWFLAKE_WAREHOUSE", "SAVEHUB_WH"),
+            "database": env.get("SNOWFLAKE_DATABASE", "SAVEHUB"),
+            "schema": schema or env.get("SNOWFLAKE_SCHEMA", "BILLING"),
+            "paramstyle": "qmark",
+            "session_parameters": {"QUERY_TAG": "savehub-pipeline"},  # find our queries in history
+        }
+        params.update(overrides)
+        self.con = snowflake.connector.connect(**params)
+
+    def execute(self, sql, params=()):
+        with self.con.cursor() as cur:
+            cur.execute(sql, list(params) or None)
+
+    def executemany(self, sql, rows):
+        if rows:
+            with self.con.cursor() as cur:
+                cur.executemany(sql, [list(r) for r in rows])  # one array-bound statement
+
+    def query(self, sql, params=()):
+        with self.con.cursor() as cur:
+            cur.execute(sql, list(params) or None)
+            return [tuple(r) for r in cur.fetchall()]
+
+    @contextmanager
+    def transaction(self):
+        self.execute("BEGIN")
+        try:
+            yield
+        except BaseException:
+            self.execute("ROLLBACK")
+            raise
+        self.execute("COMMIT")
+
+    def close(self):
+        self.con.close()
+
+
 def connect() -> Warehouse:
     kind = os.environ.get("WAREHOUSE", "duckdb")
     if kind == "duckdb":
         default = config.PROJECT_ROOT / "data" / "warehouse.duckdb"
         return DuckDBWarehouse(os.environ.get("DUCKDB_PATH", default))
     if kind == "snowflake":
-        raise NotImplementedError("Snowflake support is not implemented yet")
+        return SnowflakeWarehouse()
     raise ValueError(f"WAREHOUSE must be duckdb or snowflake, got {kind!r}")
