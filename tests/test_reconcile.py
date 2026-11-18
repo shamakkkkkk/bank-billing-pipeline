@@ -1,7 +1,6 @@
 """Specification for the reconciliation SQL (sql/monthly/reconcile_*.sql).
 
-Written before the SQL exists: these tests are skipped while the files are
-TODO stubs, and must all pass once they are written. Each test breaks the
+Written before the SQL existed (skipped while a file is a TODO stub). Each test breaks the
 data in one realistic way and expects the reconciliation to notice.
 Run just these:  uv run pytest tests/test_reconcile.py -v
 """
@@ -131,3 +130,25 @@ def test_share_above_100_percent_is_caught(invoiced):
     monthly.create_partner_statements(invoiced, MONTH)
     rows = problems(invoiced, "monthly/reconcile_partner_payouts")
     assert any("P01" in str(r[1]) for r in rows), rows
+
+
+@needs_invoice_check
+def test_detects_invoice_without_revenue(invoiced):
+    """An invoice for a bank that earned nothing this month (e.g. a stale or duplicate run)."""
+    invoiced.execute(
+        "INSERT INTO invoices SELECT 'INV-2026-10-DELTA', invoice_month, 'delta', period_start, "
+        "period_end, 0, 0, 10.00, currency, created_at FROM invoices WHERE bank = 'alpha'"
+    )
+    rows = problems(invoiced, "monthly/reconcile_invoices")
+    assert [(r[0], r[1]) for r in rows] == [("invoice_without_revenue", "delta")]
+
+
+@needs_payout_check
+def test_detects_statement_for_partner_without_referred_revenue(invoiced):
+    invoiced.execute(
+        "INSERT INTO partner_statements SELECT 'STM-2026-10-P99', statement_month, 'P99', "
+        "'Ghost', period_start, period_end, 0, 0, 5, 5.00, currency, created_at "
+        "FROM partner_statements WHERE partner_id = 'P01'"
+    )
+    rows = problems(invoiced, "monthly/reconcile_partner_payouts")
+    assert [(r[0], r[1]) for r in rows] == [("statement_without_referred_revenue", "P99")]

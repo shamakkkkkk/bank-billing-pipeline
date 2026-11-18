@@ -9,9 +9,8 @@ SaveHub is fictional: 3 partner banks, 100 customers, 2 referral partners, one
 currency. The engineering problems are real ones: late and broken files,
 re-runs, backfills, rounding, and proving that the numbers add up.
 
-> Status: steps 1 to 5 of [PROJECT_BRIEF.md](PROJECT_BRIEF.md) are done. Open:
-> the reconciliation SQL ([docs/reconciliation_task.md](docs/reconciliation_task.md)),
-> the Snowflake switch, screenshots.
+> Status: steps 1 to 5 of [PROJECT_BRIEF.md](PROJECT_BRIEF.md) are done and
+> October runs end to end. Open: the Snowflake switch, screenshots.
 
 ## Why
 
@@ -134,7 +133,7 @@ without Airflow.
 | Level | What | Runs |
 |---|---|---|
 | Business rules | validation, revenue, payouts, invoices: exact `Decimal` comparisons | `uv run pytest` (DuckDB in memory, moto for S3) |
-| Specification | 10 tests the reconciliation SQL must pass | same, skipped until the SQL exists |
+| Reconciliation | 12 tests, each breaks the data one way and expects the check to catch it | same |
 | End to end | upload to LocalStack S3, the deployed Lambda sorts the files | `pytest -m integration` |
 | DAGs | both DAGs import in the real Airflow image | CI, [scripts/check_dags.py](scripts/check_dags.py) |
 
