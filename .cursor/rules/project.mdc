@@ -1,0 +1,46 @@
+---
+description: SaveHub billing pipeline conventions (always on)
+alwaysApply: true
+---
+
+# Project conventions
+
+This is a billing pipeline: wrong numbers cost money. Prefer failing loudly to guessing.
+
+## Money
+- Money is `Decimal` in Python and `NUMERIC(p, s)` in SQL. Never `float`, never `DOUBLE`.
+- Never divide money in SQL: DuckDB turns `DECIMAL / x` into `DOUBLE`. Pre-compute
+  ratios in Python with `Decimal` (see `daily.daily_fee_rate`).
+- Round exactly once: `ROUND(SUM(exact), 2)` on monthly documents
+  (`sql/monthly/create_*.sql`). Daily tables keep full precision.
+- Parse amounts with a strict regex before `Decimal()`: `Decimal("NaN")` and
+  `Decimal("1e5")` parse fine.
+
+## Idempotency
+- Every step deletes what it is about to write (by date, bank or month) and inserts,
+  inside `wh.transaction()`. Re-running any date must give identical rows; add a test.
+- IDs are deterministic (`INV-2026-10-ALPHA`), never random or sequence-based.
+- A check that fails must raise inside the transaction so it rolls back.
+
+## Structure
+- Business logic lives in `src/savehub/` as plain functions taking `(wh, s3, ...)`.
+  DAG files in `dags/` stay thin: schedule, retries, pool, and calls into `savehub`.
+- SQL lives in `sql/**/*.sql`, run with `wh.run("folder/name", params)`.
+- Talk to the warehouse only through `savehub.warehouse.Warehouse`, never
+  `duckdb` directly: the same code must run on Snowflake (`WAREHOUSE=snowflake`).
+- Portable SQL only: `?` parameters, CTEs, window functions, `||`, `COALESCE`.
+  No DuckDB-only syntax such as `ASOF JOIN` or `SELECT * EXCLUDE` (the latter is
+  fine in tests, which always run on DuckDB).
+- AWS clients are created with plain `boto3.client("s3")`: endpoint and
+  credentials come from the environment. Never hard-code an endpoint or a key.
+- Secrets only in `.env` / `.env.aws` (git-ignored). Never in code, tests or logs.
+
+## Tests
+- `uv run pytest` must pass without Docker: DuckDB `:memory:` + moto for S3
+  (fixtures in `tests/conftest.py`, data helpers in `tests/bankdata.py`).
+- End-to-end tests against LocalStack are marked `@pytest.mark.integration`.
+- For money, compare against an independent `Decimal` calculation, exactly (`==`).
+
+## Style
+- Python 3.12, ruff (`uv run ruff check . && uv run ruff format .`), line length 100.
+- Comments explain *why* (the business rule or the trap), not what the line does.

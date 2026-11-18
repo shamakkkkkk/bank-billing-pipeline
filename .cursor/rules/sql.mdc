@@ -1,0 +1,19 @@
+---
+description: Rules for warehouse SQL files
+globs: sql/**/*.sql
+alwaysApply: false
+---
+
+# Warehouse SQL
+
+- Must run unchanged on DuckDB and Snowflake. Parameters are `?` (qmark).
+- Start with a comment: what the query produces, its parameters in order, and
+  any business rule it encodes.
+- Money columns: `NUMERIC`. No division of money (DuckDB returns DOUBLE).
+- No rounding outside `sql/monthly/create_*.sql`.
+- `INSERT` queries list their target columns explicitly.
+- Inner joins can drop rows silently: when a join must not lose rows, the Python
+  caller checks the row counts and raises (see `daily.calculate_revenue`).
+- Monthly queries read the month from the one-row table `billing_period`
+  (`month_label, period_start, period_end, created_at`), not from parameters.
+- Schema changes go to `sql/schema.sql` with `CREATE TABLE IF NOT EXISTS`.

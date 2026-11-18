@@ -1,0 +1,21 @@
+---
+description: Rules for Airflow DAG files
+globs: dags/**/*.py
+alwaysApply: false
+---
+
+# Airflow DAGs (Airflow 3, TaskFlow API)
+
+- Import from `airflow.sdk` (`dag`, `task`). Schedule with
+  `CronDataIntervalTimetable(cron, timezone="Europe/Berlin")` so `{{ ds }}` is the
+  business date the run is about (the run at 07:00 on 10-02 processes 10-01).
+- `catchup=False`; past dates are processed on purpose with `airflow backfill create`.
+- Every task touching the warehouse uses `pool="warehouse"` (DuckDB: one writer).
+- Import `savehub` modules inside the task function, not at the top of the file:
+  keeps DAG parsing fast and the scheduler free of heavy imports.
+- Pass the date as a templated argument (`"{{ ds }}"`), convert with `date.fromisoformat`.
+- Retries for things that fix themselves (a late file); `retries=0` for things
+  that do not (a reconciliation mismatch).
+- Return small summaries (row counts) so they show in the XCom tab; print one log
+  line a human can read.
+- New DAG: add its id to `scripts/check_dags.py` and a section to `docs/runbook.md`.

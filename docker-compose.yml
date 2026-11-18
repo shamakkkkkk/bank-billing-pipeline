@@ -88,6 +88,7 @@ services:
       - ./sql:/opt/airflow/sql
       - ./seeds:/opt/airflow/seeds
       - ./logs:/opt/airflow/logs
+      - ./scripts:/opt/airflow/scripts
       - ./data:/opt/airflow/data  # warehouse.duckdb lives here, readable from your laptop
     depends_on:
       postgres:
