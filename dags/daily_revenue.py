@@ -1,4 +1,4 @@
-"""daily_revenue: validated bank files -> balances -> daily revenue.
+"""daily_revenue: validated bank files -> balances -> daily revenue -> partner payouts.
 
 Schedule: 07:00 Berlin, for the PREVIOUS day. Airflow's data interval for the
 run at 2026-10-02 07:00 is [10-01 07:00, 10-02 07:00), and its logical date
@@ -72,7 +72,27 @@ def daily_revenue():
         print(f"{business_date}: {rows} revenue rows, total {total} EUR (unrounded)")
         return rows
 
-    prepare() >> load(BUSINESS_DATE) >> calculate_revenue(BUSINESS_DATE)
+    @task
+    def calculate_partner_payouts(business_date: str) -> int:
+        """daily_revenue x partner share -> partner_payouts_daily (delete + insert)."""
+        from savehub import daily, warehouse
+
+        with warehouse.connect() as wh:
+            rows = daily.calculate_partner_payouts(wh, date.fromisoformat(business_date))
+            totals = wh.query(
+                "SELECT partner_id, SUM(payout_eur) FROM partner_payouts_daily "
+                "WHERE payout_date = ? GROUP BY 1 ORDER BY 1",
+                [business_date],
+            )
+        print(f"{business_date}: {rows} payout rows, per partner (unrounded): {totals}")
+        return rows
+
+    (
+        prepare()
+        >> load(BUSINESS_DATE)
+        >> calculate_revenue(BUSINESS_DATE)
+        >> calculate_partner_payouts(BUSINESS_DATE)
+    )
 
 
 daily_revenue()

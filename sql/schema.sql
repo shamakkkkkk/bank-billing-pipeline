@@ -43,3 +43,16 @@ CREATE TABLE IF NOT EXISTS daily_revenue (
     revenue_eur     NUMERIC(38, 14) NOT NULL,  -- exact product of the two above
     PRIMARY KEY (revenue_date, bank, customer_id)
 );
+
+-- Partner share of revenue from customers they referred, per customer per day.
+-- Not rounded (same rule as daily_revenue). Customers without a partner: no row.
+CREATE TABLE IF NOT EXISTS partner_payouts_daily (
+    payout_date   DATE            NOT NULL,
+    partner_id    VARCHAR         NOT NULL,
+    bank          VARCHAR         NOT NULL,
+    customer_id   VARCHAR         NOT NULL,
+    revenue_eur   NUMERIC(38, 14) NOT NULL,  -- copied from daily_revenue
+    revenue_share NUMERIC(5, 4)   NOT NULL,  -- copied from partners
+    payout_eur    NUMERIC(38, 18) NOT NULL,  -- exact product of the two above
+    PRIMARY KEY (payout_date, partner_id, bank, customer_id)
+);

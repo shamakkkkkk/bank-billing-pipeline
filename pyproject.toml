@@ -27,7 +27,7 @@ packages = ["src/savehub"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The Lambda is a standalone file (it is zipped alone), so put its folder on the path.
-pythonpath = ["lambdas/validate_bank_file"]
+pythonpath = ["lambdas/validate_bank_file", "tests"]
 # Integration tests need the running docker stack: uv run pytest -m integration
 addopts = "-m 'not integration'"
 markers = ["integration: needs docker compose (LocalStack) running"]

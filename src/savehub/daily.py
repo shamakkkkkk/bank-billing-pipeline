@@ -150,3 +150,29 @@ def calculate_revenue(wh: Warehouse, day: date) -> int:
                 "a bank has no rate in force (check seeds/bank_rates.csv)"
             )
     return revenue
+
+
+# --- partner payouts ---------------------------------------------------------
+
+
+class UnknownPartner(Exception):
+    """A customer is linked to a partner_id that is not in seeds/partners.csv."""
+
+
+def calculate_partner_payouts(wh: Warehouse, day: date) -> int:
+    with wh.transaction():
+        wh.execute("DELETE FROM partner_payouts_daily WHERE payout_date = ?", [day])
+        wh.run("daily/calculate_partner_payouts", [day])
+        unknown = wh.query(
+            "SELECT DISTINCT d.partner_id FROM daily_revenue d "
+            "LEFT JOIN partners p ON p.partner_id = d.partner_id "
+            "WHERE d.revenue_date = ? AND d.partner_id IS NOT NULL AND p.partner_id IS NULL "
+            "ORDER BY 1",
+            [day],
+        )
+        if unknown:  # raising rolls the transaction back
+            raise UnknownPartner(
+                f"{day}: unknown partner_id(s) {', '.join(r[0] for r in unknown)}: "
+                "add them to seeds/partners.csv or ask the bank to correct the file"
+            )
+    return wh.scalar("SELECT COUNT(*) FROM partner_payouts_daily WHERE payout_date = ?", [day])

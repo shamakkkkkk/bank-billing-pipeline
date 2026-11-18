@@ -3,53 +3,11 @@
 from datetime import date
 from decimal import Decimal
 
-import boto3
 import pytest
-from moto import mock_aws
+from bankdata import BUCKET, DAY, put_validated
 
 from savehub import daily
-from savehub import generator as g
 from savehub.warehouse import DuckDBWarehouse
-
-BUCKET = "test-bucket"
-SEED = 42
-DAY = date(2026, 10, 1)
-
-
-@pytest.fixture
-def wh():
-    with DuckDBWarehouse(":memory:") as w:
-        daily.prepare(w)
-        yield w
-
-
-@pytest.fixture
-def s3(monkeypatch):
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-central-1")
-    monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
-    with mock_aws():
-        client = boto3.client("s3")
-        client.create_bucket(
-            Bucket=BUCKET, CreateBucketConfiguration={"LocationConstraint": "eu-central-1"}
-        )
-        yield client
-
-
-@pytest.fixture(scope="module")
-def customers():
-    return g.make_customers(g.load_banks(), g.load_partner_ids(), SEED)
-
-
-def put_validated(s3, customers, start, end=None, skip_banks=()):
-    """Upload generator files as if the Lambda had already validated them."""
-    files = g.build_files(customers, start, end or start, SEED)
-    for f in files:
-        if f.bank in skip_banks:
-            continue
-        lines = [",".join(f.header)] + [",".join(r[c] for c in f.header) for r in f.rows]
-        s3.put_object(Bucket=BUCKET, Key=daily.validated_key(f.day, f.bank),
-                      Body=("\n".join(lines) + "\n").encode())  # fmt: skip
-    return files
 
 
 def run_day(wh, s3, day):
