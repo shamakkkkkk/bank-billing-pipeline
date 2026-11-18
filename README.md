@@ -1,5 +1,7 @@
 # Bank billing pipeline
 
+[![CI](https://github.com/shamakkkkkk/bank-billing-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/shamakkkkkk/bank-billing-pipeline/actions/workflows/ci.yml)
+
 An end-to-end billing pipeline for a savings platform: partner banks send daily
 balance files, the pipeline turns them into **monthly invoices for banks** and
 **payout statements for referral partners**, and refuses to export anything
