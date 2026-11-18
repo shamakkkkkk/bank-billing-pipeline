@@ -56,8 +56,14 @@ services:
       retries: 30
 
   airflow:
-    image: apache/airflow:3.4.0-python3.12
-    command: standalone
+    build: .  # Dockerfile: the Airflow image + duckdb
+    image: savehub-airflow:local
+    # The "warehouse" pool has 1 slot: DuckDB allows one writing process, so
+    # tasks that touch it run one at a time (Snowflake could use more slots).
+    command: >
+      bash -c "airflow db migrate &&
+               airflow pools set warehouse 1 'DuckDB: one writer at a time' &&
+               exec airflow standalone"
     env_file: ${SAVEHUB_ENV_FILE:-.env}
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -72,6 +78,8 @@ services:
       # Our package (src/savehub) is importable from DAGs.
       PYTHONPATH: /opt/airflow/src
       SAVEHUB_SEEDS_DIR: /opt/airflow/seeds
+      WAREHOUSE: ${WAREHOUSE:-duckdb}
+      DUCKDB_PATH: /opt/airflow/data/warehouse.duckdb
     ports:
       - "8080:8080"
     volumes:
@@ -80,6 +88,7 @@ services:
       - ./sql:/opt/airflow/sql
       - ./seeds:/opt/airflow/seeds
       - ./logs:/opt/airflow/logs
+      - ./data:/opt/airflow/data  # warehouse.duckdb lives here, readable from your laptop
     depends_on:
       postgres:
         condition: service_healthy
