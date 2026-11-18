@@ -1,0 +1,88 @@
+# Airflow (scheduler + API/UI in one "standalone" container), Postgres as
+# Airflow's metadata DB, and optionally LocalStack as fake AWS.
+#
+#   LocalStack:  docker compose up -d                        (uses .env)
+#   Real AWS:    docker compose --env-file .env.aws up -d    (uses .env.aws)
+#   UI: http://localhost:8080 (no login locally)
+#
+# The chosen file decides everything: COMPOSE_PROFILES=localstack in .env starts
+# LocalStack; .env.aws has no profile and no AWS_ENDPOINT_URL, so boto3 talks to AWS.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:2026.10.8
+    profiles: [localstack]
+    networks:
+      default:
+        # localhost.localstack.cloud resolves to 127.0.0.1 on your laptop (public DNS)
+        # and, thanks to this alias, to this container inside the docker network.
+        # So one AWS_ENDPOINT_URL works for the host and for Airflow.
+        aliases: [localhost.localstack.cloud]
+    ports:
+      - "4566:4566"
+    environment:
+      # ${...} is read from .env by compose itself
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
+      S3_BUCKET: ${S3_BUCKET:-savehub-bank-files}
+      SERVICES: s3,lambda,logs,iam
+    volumes:
+      # scripts in ready.d run once LocalStack is up: they create the bucket
+      - ./localstack/init:/etc/localstack/init/ready.d:ro
+      - /var/run/docker.sock:/var/run/docker.sock  # Lambda runs functions in containers (step 2)
+    healthcheck:
+      # Healthy only once init scripts (bucket creation) finished. No curl in the image.
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import json,urllib.request as u; assert json.load(u.urlopen('http://localhost:4566/_localstack/init/ready'))['completed']"
+      interval: 5s
+      retries: 30
+
+  airflow:
+    image: apache/airflow:3.4.0-python3.12
+    command: standalone
+    env_file: ${SAVEHUB_ENV_FILE:-.env}
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      # Sized for a laptop: one UI/API worker process, at most 4 tasks in parallel.
+      AIRFLOW__API__WORKERS: "1"
+      AIRFLOW__CORE__PARALLELISM: "4"
+      # Local only: every visitor is admin, no login screen.
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+      # Our package (src/savehub) is importable from DAGs.
+      PYTHONPATH: /opt/airflow/src
+      SAVEHUB_SEEDS_DIR: /opt/airflow/seeds
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./sql:/opt/airflow/sql
+      - ./seeds:/opt/airflow/seeds
+      - ./logs:/opt/airflow/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+        required: false  # not started in real-AWS mode
+
+volumes:
+  postgres-data:
