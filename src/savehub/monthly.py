@@ -108,7 +108,7 @@ def reconciliation_problems(wh: Warehouse, month: str) -> list[tuple]:
         sql = read_sql(name)
         if "TODO" in sql:
             raise ReconciliationNotWritten(
-                f"sql/{name}.sql is still a stub: see docs/reconciliation_task.md"
+                f"sql/{name}.sql is still a stub: see docs/reconciliation.md"
             )
         problems += wh.query(sql)
     return problems

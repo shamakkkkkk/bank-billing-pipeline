@@ -115,7 +115,7 @@ does not fix itself.
    `sql/monthly/reconcile_*.sql` against `data/warehouse.duckdb`.
 
 **reconcile: ReconciliationNotWritten.** The reconciliation SQL is still a
-stub, see `docs/reconciliation_task.md`.
+stub (contains TODO), see `docs/reconciliation.md`.
 
 **export fails.** S3 permissions or connectivity. Export overwrites the
 month's files and deletes leftovers, so just clear and re-run it.

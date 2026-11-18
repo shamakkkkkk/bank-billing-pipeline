@@ -5,7 +5,7 @@ balance files, the pipeline turns them into **monthly invoices for banks** and
 **payout statements for referral partners**, and refuses to export anything
 that does not reconcile to the cent.
 
-**Python · SQL · Apache Airflow 3 · AWS S3 + Lambda (LocalStack) · DuckDB, Snowflake-ready · pytest · GitHub Actions**
+**Python · SQL · Apache Airflow 3 · AWS S3 + Lambda (LocalStack) · DuckDB · pytest · GitHub Actions**
 
 ---
 
@@ -21,7 +21,7 @@ that does not reconcile to the cent.
 
 **Where to look first**
 
-1. [`sql/monthly/reconcile_invoices.sql`](sql/monthly/reconcile_invoices.sql): the gate before any invoice leaves the company.
+1. [`sql/monthly/reconcile_invoices.sql`](sql/monthly/reconcile_invoices.sql): the gate before any invoice leaves the company ([how it works](docs/reconciliation.md)).
 2. [`src/savehub/daily.py`](src/savehub/daily.py): idempotent loading and revenue calculation, failing loudly instead of losing money.
 3. [`lambdas/validate_bank_file/validate.py`](lambdas/validate_bank_file/validate.py): file validation at the S3 boundary.
 4. [`docs/runbook.md`](docs/runbook.md): what an on-call engineer does when something fails.
@@ -35,7 +35,7 @@ flowchart LR
     L["Lambda<br/>validate file"]
     V["S3<br/>validated/YYYY-MM-DD/"]
     R["S3 rejected/<br/>+ .error.txt"]
-    W[("Warehouse<br/>DuckDB · Snowflake")]
+    W[("Warehouse<br/>DuckDB")]
     OUT["S3<br/>invoices/ · statements/"]
 
     subgraph D["Airflow · daily_revenue · 07:00 for the previous day"]
@@ -198,13 +198,17 @@ environment. `.env` points at LocalStack; [`.env.aws.example`](.env.aws.example)
 shows the real-AWS setup, and the deploy script
 [`infra/deploy_lambda.sh`](infra/deploy_lambda.sh) is the same for both. The
 Lambda's IAM policy allows only its three S3 prefixes, and its trigger listens
-to `incoming/` only, otherwise it would trigger itself in a loop.
+to `incoming/` only, otherwise it would trigger itself in a loop. Tested against
+LocalStack; the real-AWS path is configuration only and has not been run against
+an AWS account.
 
 ### Warehouse behind a small interface
 [`warehouse.py`](src/savehub/warehouse.py) exposes `execute`, `query` and
-`transaction`. DuckDB runs locally and in CI (fast, free, no account); Snowflake
-is selected with `WAREHOUSE=snowflake`. All SQL lives in [`sql/`](sql/) and uses
-only syntax both engines accept.
+`transaction`; nothing else in the code talks to the database directly. Today it
+runs on DuckDB (fast, free, no account, ideal for CI). The SQL in [`sql/`](sql/)
+sticks to portable syntax (`?` parameters, CTEs, window functions, no money
+division) so that a Snowflake adapter is one new class selected by
+`WAREHOUSE=snowflake`, not a rewrite. That adapter is the next step.
 
 ### Airflow dates are business dates
 A `CronDataIntervalTimetable` gives the run at 07:00 on 2 October the logical
@@ -246,8 +250,8 @@ Deliberate simplifications, each with what a production version would do:
 | A Lambda event can be lost after its retries | Dead-letter queue with an alert |
 | Files read into memory, rows inserted one batch at a time | `COPY INTO` from an S3 stage for Snowflake |
 
-**Next steps:** run on Snowflake, alerting on failed tasks, partner share
-history, a dead-letter queue for the Lambda.
+**Next steps:** a Snowflake adapter for the warehouse interface, alerting on
+failed tasks, partner share history, a dead-letter queue for the Lambda.
 
 ## Repository layout
 
@@ -260,8 +264,8 @@ infra/             deploy_lambda.sh, IAM policies             same for LocalStac
 localstack/init/   creates the bucket and deploys the Lambda on startup
 seeds/             bank_rates.csv, partners.csv               reference data with history
 tests/             unit, reconciliation and integration tests
-docs/              runbook.md, reconciliation_task.md
+docs/              runbook.md, reconciliation.md
 .cursor/           project rules and a /scaffold-dag command for AI-assisted work
 ```
 
-<!-- TODO: screenshots (Airflow grid for October, Snowflake query) once step 6 is done -->
+<!-- TODO: screenshots (Airflow grid for October, Snowflake query) once running on Snowflake -->

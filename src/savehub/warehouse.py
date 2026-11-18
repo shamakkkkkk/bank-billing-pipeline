@@ -111,5 +111,5 @@ def connect() -> Warehouse:
         default = config.PROJECT_ROOT / "data" / "warehouse.duckdb"
         return DuckDBWarehouse(os.environ.get("DUCKDB_PATH", default))
     if kind == "snowflake":
-        raise NotImplementedError("Snowflake arrives in step 6")
+        raise NotImplementedError("Snowflake support is not implemented yet")
     raise ValueError(f"WAREHOUSE must be duckdb or snowflake, got {kind!r}")

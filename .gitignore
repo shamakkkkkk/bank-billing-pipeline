@@ -1,3 +1,6 @@
+# private notes, not part of the project
+PROJECT_BRIEF.md
+
 # secrets
 .env
 .env.*
