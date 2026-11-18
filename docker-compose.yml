@@ -39,9 +39,12 @@ services:
       S3_BUCKET: ${S3_BUCKET:-savehub-bank-files}
       SERVICES: s3,lambda,logs,iam
     volumes:
-      # scripts in ready.d run once LocalStack is up: they create the bucket
+      # scripts in ready.d run once LocalStack is up: bucket, then Lambda + S3 trigger
       - ./localstack/init:/etc/localstack/init/ready.d:ro
-      - /var/run/docker.sock:/var/run/docker.sock  # Lambda runs functions in containers (step 2)
+      - ./infra:/opt/savehub/infra:ro
+      - ./lambdas:/opt/savehub/lambdas:ro
+      - ./seeds:/opt/savehub/seeds:ro
+      - /var/run/docker.sock:/var/run/docker.sock  # LocalStack runs each Lambda in a container
     healthcheck:
       # Healthy only once init scripts (bucket creation) finished. No curl in the image.
       test:

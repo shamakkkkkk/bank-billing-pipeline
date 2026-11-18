@@ -1,7 +1,11 @@
 #!/bin/bash
 # Runs inside LocalStack once it is ready. On real AWS the bucket would be
-# created once by infrastructure code (Terraform/CDK), not by the pipeline.
+# created once by hand or by infrastructure code, not by the pipeline.
 set -euo pipefail
-AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=eu-central-1 \
-  aws --endpoint-url http://localhost:4566 s3 mb "s3://${S3_BUCKET:-savehub-bank-files}" || true
-echo "bucket ${S3_BUCKET:-savehub-bank-files} ready"
+export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=eu-central-1
+export AWS_ENDPOINT_URL=http://localhost:4566
+BUCKET=${S3_BUCKET:-savehub-bank-files}
+aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null \
+  || aws s3api create-bucket --bucket "$BUCKET" \
+       --create-bucket-configuration LocationConstraint=eu-central-1 >/dev/null
+echo "bucket $BUCKET ready"
