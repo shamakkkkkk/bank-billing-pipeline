@@ -1,180 +1,267 @@
-# SaveHub bank billing pipeline
+# Bank billing pipeline
 
-Banks send daily customer balance files. This pipeline validates them, loads
-them into a warehouse, computes the platform's daily revenue and partner payouts,
-and at month end produces invoices to banks and statements to partners, but
-only after checking that every amount reconciles to the cent.
+An end-to-end billing pipeline for a savings platform: partner banks send daily
+balance files, the pipeline turns them into **monthly invoices for banks** and
+**payout statements for referral partners**, and refuses to export anything
+that does not reconcile to the cent.
 
-SaveHub is fictional: 3 partner banks, 100 customers, 2 referral partners, one
-currency. The engineering problems are real ones: late and broken files,
-re-runs, backfills, rounding, and proving that the numbers add up.
+**Python · SQL · Apache Airflow 3 · AWS S3 + Lambda (LocalStack) · DuckDB, Snowflake-ready · pytest · GitHub Actions**
 
-> Status: steps 1 to 5 of [PROJECT_BRIEF.md](PROJECT_BRIEF.md) are done and
-> October runs end to end. Open: the Snowflake switch, screenshots.
+---
 
-## Why
+## At a glance
 
-Portfolio project for a working student role on a corporate services revenue
-team (Python, SQL, Airflow, Snowflake, AWS Lambda and S3). Invoicing, partner
-compensation and revenue recognition pipelines, in a small and honest version.
+| | |
+|---|---|
+| **Problem** | Turn ~100 customers' daily balances at 3 banks into correct invoices and partner payouts, every day and every month, despite late or broken files |
+| **Revenue rule** | Each bank pays a yearly fee on deposits (0.3 / 0.5 / 0.7 %), accrued daily: `balance × rate / 365`. Referral partners get 20 % or 15 % of the revenue from customers they brought |
+| **Data** | Simulated by a deterministic generator (fictional platform "SaveHub", EUR only). It can also produce five kinds of broken file on purpose |
+| **Result** | October 2026 runs end to end: 93 bank files → 3,100 revenue rows → 3 invoices, 2 partner statements, exported as CSV |
+| **Tests** | 97 unit tests + an end-to-end test against LocalStack, all green, CI on every push |
+
+**Where to look first**
+
+1. [`sql/monthly/reconcile_invoices.sql`](sql/monthly/reconcile_invoices.sql): the gate before any invoice leaves the company.
+2. [`src/savehub/daily.py`](src/savehub/daily.py): idempotent loading and revenue calculation, failing loudly instead of losing money.
+3. [`lambdas/validate_bank_file/validate.py`](lambdas/validate_bank_file/validate.py): file validation at the S3 boundary.
+4. [`docs/runbook.md`](docs/runbook.md): what an on-call engineer does when something fails.
 
 ## How it works
 
+```mermaid
+flowchart LR
+    G["generate.py<br/>daily bank files"]
+    IN["S3<br/>incoming/"]
+    L["Lambda<br/>validate file"]
+    V["S3<br/>validated/YYYY-MM-DD/"]
+    R["S3 rejected/<br/>+ .error.txt"]
+    W[("Warehouse<br/>DuckDB · Snowflake")]
+    OUT["S3<br/>invoices/ · statements/"]
+
+    subgraph D["Airflow · daily_revenue · 07:00 for the previous day"]
+        direction LR
+        d0[prepare] --> d1[load] --> d2[calculate_revenue] --> d3[calculate_partner_payouts]
+    end
+
+    subgraph M["Airflow · monthly_invoices · 1st of month for the previous month"]
+        direction LR
+        m1[create_invoices] --> m3[reconcile]
+        m2[create_partner_statements] --> m3
+        m3 --> m4[export]
+    end
+
+    G -->|upload| IN
+    IN -->|S3 event| L
+    L -->|valid| V
+    L -->|invalid| R
+    V --> D
+    D --> W
+    W --> M
+    M --> OUT
 ```
-generate.py ──> S3 incoming/bank_alpha_2026-10-01.csv
-                   │ S3 event (incoming/*.csv only)
-                   ▼
-             Lambda: validate ──┬─ ok ──> validated/2026-10-01/bank_alpha_2026-10-01.csv
-                                └─ bad ─> rejected/<file> + <file>.error.txt
 
-Airflow  daily_revenue     07:00 Berlin, for the previous day
-         prepare ─> load ─> calculate_revenue ─> calculate_partner_payouts
-                    balances    daily_revenue        partner_payouts_daily
-
-Airflow  monthly_invoices  09:00 Berlin on the 1st, for the previous month
-         create_invoices ─────────┐
-                                  ├─> reconcile ─> export ─> S3 invoices/2026-10/*.csv
-         create_partner_statements┘                            statements/2026-10/*.csv
-```
-
-| Step | Code | What it guarantees |
+| Stage | What happens | Guarantee |
 |---|---|---|
-| Generate | [generator.py](src/savehub/generator.py) | Deterministic files; can inject 5 kinds of broken file |
-| Validate | [validate.py](lambdas/validate_bank_file/validate.py) | Only well-formed files reach the warehouse; the bank gets a readable reason |
-| Load | [daily.py](src/savehub/daily.py) | A day is loaded for all banks or not at all |
-| Revenue | [calculate_revenue.sql](sql/daily/calculate_revenue.sql) | `balance × annual rate / 365`, with the rate in force that day |
-| Payouts | [calculate_partner_payouts.sql](sql/daily/calculate_partner_payouts.sql) | `revenue × partner share`, for referred customers only |
-| Invoices, statements | [sql/monthly/](sql/monthly/) | One document per bank and partner, rounded once |
-| Reconcile | [monthly.py](src/savehub/monthly.py) | Nothing is exported unless invoices match revenue and payouts stay below revenue |
+| **Validate** (Lambda) | Checks columns, amounts, dates, banks and duplicate customers the moment a file lands | Broken files never reach the warehouse; the bank gets a readable reason |
+| **Load** (daily) | Reads all banks' validated files for the day into `balances` | A day is loaded for every bank or not at all |
+| **Revenue** (daily) | `balance × daily rate`, using the bank rate in force that day | Every balance gets revenue, or the run stops |
+| **Payouts** (daily) | `revenue × partner share` for referred customers | An unknown partner stops the run |
+| **Invoices, statements** (monthly) | One document per bank and per partner | Rounded to cents exactly once |
+| **Reconcile** (monthly) | Recomputes every amount from the daily data | Any difference, even 0.01 €, blocks the export |
 
-## Quick start
+## What it produces
 
-Requirements: Docker (5 GB memory), [uv](https://docs.astral.sh/uv/), a free
-LocalStack "Hobby" auth token.
+An invoice, exported to `s3://…/invoices/2026-10/INV-2026-10-ALPHA.csv`:
+
+```csv
+invoice_id,bank,period_start,period_end,customer_days,amount_eur,currency
+INV-2026-10-ALPHA,alpha,2026-10-01,2026-10-31,899,579.18,EUR
+```
+
+A partner statement, `statements/2026-10/STM-2026-10-P01.csv`:
+
+```csv
+statement_id,partner_id,partner_name,period_start,period_end,referred_customers,referred_revenue_eur,amount_eur,currency
+STM-2026-10-P01,P01,MoneyTips,2026-10-01,2026-10-31,27,858.91,171.78,EUR
+```
+
+What a bank receives when its file is rejected, `rejected/bank_gamma_2026-10-28.csv.error.txt`:
+
+```text
+File:        incoming/bank_gamma_2026-10-28.csv
+Rejected at: 2026-11-18T19:08:06+00:00
+Problems (1):
+  - line 14: balance_eur uses a decimal comma (48211,86), expected a dot
+Fix the file and upload it again to incoming/ with the same name.
+```
+
+And what the reconciliation reports when an invoice is off by one cent
+(nothing is exported):
+
+```text
+ReconciliationFailed: 2026-10: 1 problem(s), nothing exported:
+  invoice_amount_mismatch: beta expected 1399.74 actual 1399.75
+```
+
+## Run it locally
+
+Requirements: Docker with 5 GB memory, [uv](https://docs.astral.sh/uv/), and a
+free [LocalStack](https://app.localstack.cloud) "Hobby" auth token (no AWS
+account needed).
 
 ```bash
-cp .env.example .env          # set LOCALSTACK_AUTH_TOKEN
-docker compose up -d          # Airflow on http://localhost:8080, LocalStack on :4566
-                              # LocalStack creates the bucket and deploys the Lambda
+# 1. Start Airflow, Postgres and LocalStack. LocalStack creates the S3 bucket
+#    and deploys the Lambda with its S3 trigger on startup.
+cp .env.example .env              # paste your LOCALSTACK_AUTH_TOKEN
+docker compose up -d              # Airflow UI: http://localhost:8080
 uv sync
 
-# October: 3 banks x 31 days, 2 files deliberately broken
+# 2. Simulate October: 3 banks x 31 days, 2 files deliberately broken.
 uv run --env-file .env generate.py --month 2026-10 --bad-files 2
 
-# unpause daily_revenue in the UI, then
+# 3. Unpause daily_revenue in the UI, then process October.
+#    (--to-date is 11-01: Airflow 3 bounds backfills by run time, and the run
+#    for 31 October happens on 1 November.)
 docker compose exec airflow airflow backfill create --dag-id daily_revenue \
     --from-date 2026-10-01 --to-date 2026-11-01
 ```
 
-Unpausing also schedules the regular run for yesterday; it waits for
-yesterday's files (`generate.py --date YYYY-MM-DD`). In October, two days fail on
-purpose (their file was rejected). Fix them like a real
-incident: [docs/runbook.md](docs/runbook.md), section 1.
+Two October days fail on purpose: their bank file was rejected. Fixing them is
+a realistic incident, described in [the runbook](docs/runbook.md) (section 1).
+Unpausing also schedules the regular run for yesterday, which waits for
+yesterday's files (`generate.py --date YYYY-MM-DD`).
+
+Once all October days are green, unpause `monthly_invoices` and run October:
 
 ```bash
-uv run pytest                                  # unit tests, no Docker needed
-uv run --env-file .env pytest -m integration   # S3 -> Lambda end to end on LocalStack
+docker compose exec airflow airflow backfill create --dag-id monthly_invoices \
+    --from-date 2026-10-01 --to-date 2026-11-01
+```
+
+Tests:
+
+```bash
+uv run pytest                                  # 97 tests, no Docker needed
+uv run --env-file .env pytest -m integration   # upload to S3, Lambda sorts it
 ```
 
 ## Design decisions
 
-**Money is never a float.** `Decimal` in Python, `NUMERIC` in SQL. One trap
-found on the way: DuckDB computes `DECIMAL / 365` as `DOUBLE`. So SQL never
-divides money: the daily rate (`annual / 365`, 12 decimals) is computed once
-with `Decimal` when reference data is loaded, and SQL only multiplies, which is
-exact.
+### Money is never a float
+`Decimal` in Python, `NUMERIC` in SQL, from the generator to the CSV.
+**Trap found on the way:** DuckDB computes `DECIMAL / 365` as a `DOUBLE`. So SQL
+never divides money: the daily rate (`annual rate / 365`, 12 decimals) is
+computed once in Python, and SQL only multiplies, which stays exact.
+→ [`daily.py`](src/savehub/daily.py) `daily_fee_rate`
 
-**Round once, in one place.** Daily revenue and payouts keep full precision
-(14 and 18 decimals). The only rounding is `ROUND(SUM(...), 2)` on the monthly
-invoice and statement. Rounding 3,100 daily amounts one by one would drift by
-cents; the exact sums are stored next to the rounded amounts for audit.
+### Round once, at the end
+Daily revenue and payouts keep full precision. The only rounding in the system
+is `ROUND(SUM(exact), 2)` on the monthly documents. Rounding 3,100 daily
+amounts one by one would drift by cents. The exact sums are stored next to the
+rounded amounts, for audit.
+→ [`create_invoices.sql`](sql/monthly/create_invoices.sql)
 
-**Every step is idempotent.** Each step deletes what it is about to write (that
-day and bank, that day, that month) and inserts, in one transaction. Re-running
-a day, or the whole of October, gives identical rows. Verified in tests and on
-the running stack (full October reprocess: same 3,100 rows, same sum to 14
-decimals). Invoice ids are deterministic (`INV-2026-10-ALPHA`) for the same
-reason.
+### Every run can be repeated safely
+Each step deletes what it is about to write (that day, that bank, that month)
+and inserts it again, inside one transaction. Re-running a day, backfilling a
+month in any order, or re-exporting gives identical results. Proven on the
+running stack: reprocessing all of October produced the same 3,100 rows and the
+same total to 14 decimals. Document ids are deterministic (`INV-2026-10-ALPHA`)
+for the same reason.
+→ [`test_daily.py`](tests/test_daily.py) `test_running_a_day_twice_changes_nothing`, `test_backfill_out_of_order_gives_same_result`
 
-**Validate at the boundary.** The Lambda rejects a broken file within seconds
-and writes why, before anything touches the warehouse. Each defect the
-generator can produce has a test proving the Lambda catches it. Amounts are
-checked with a strict regex, because `Decimal("NaN")` and `Decimal("1e5")`
-parse without complaint.
+### Reconcile against the source of truth, not against itself
+Before export, every invoice is recomputed from `daily_revenue` and compared to
+the cent, and every partner payout is checked against the revenue from that
+partner's customers. The checks deliberately ignore numbers that the document
+query itself wrote, so a bug there cannot hide itself. Missing documents on
+either side are caught with a `FULL OUTER JOIN`.
+→ [`sql/monthly/reconcile_*.sql`](sql/monthly/), specified by 12 tests in [`test_reconcile.py`](tests/test_reconcile.py)
 
-**Fail loudly rather than lose money silently.** An inner join drops rows
-without a word. So the pipeline counts: balances without a bank rate, customers
-with an unknown partner, a day with a missing bank, or a month with a missing
-day all stop the run with a message that says what to do. Retries are on where
-waiting helps (a late file) and off where it does not (a reconciliation
-mismatch).
+### Fail loudly instead of losing money silently
+An inner join drops rows without a word. The pipeline counts instead: a balance
+without a bank rate, a customer with an unknown partner, a day with a missing
+bank or a month with a missing day each stop the run with a message that says
+what to do. Retries are on where waiting helps (a late file) and off where it
+cannot (a reconciliation mismatch).
 
-**Same code locally and in production.** No endpoint or key in the code:
-boto3 and the AWS CLI read `AWS_ENDPOINT_URL` and credentials from the
-environment. `.env` points at LocalStack; `.env.aws.example` shows the real-AWS
-setup. The Lambda deploy script ([infra/deploy_lambda.sh](infra/deploy_lambda.sh))
-is the same for both. Its IAM policy lets the function touch only `incoming/`,
-`validated/` and `rejected/`, and the S3 trigger listens to `incoming/` only, or
-the function would trigger itself forever.
+### Validate at the boundary
+The Lambda rejects a broken file within seconds, before anything reaches the
+warehouse, and writes the reason next to it. Every defect the generator can
+produce has a test proving it is caught. Amounts are checked with a strict
+pattern, because `Decimal("NaN")` and `Decimal("1e5")` parse without complaint.
+S3 delivers events at least once, so a duplicate event is handled as a no-op.
 
-**Warehouse behind an interface.** [warehouse.py](src/savehub/warehouse.py)
-exposes `execute / query / transaction`. DuckDB runs locally and in CI;
-Snowflake is an env flag (`WAREHOUSE=snowflake`). SQL files use only syntax both
-engines accept. DuckDB allows one writer, so all warehouse tasks share an
-Airflow pool with one slot.
+### Same code locally and on AWS
+No endpoint or key appears in the code: boto3 and the AWS CLI read them from the
+environment. `.env` points at LocalStack; [`.env.aws.example`](.env.aws.example)
+shows the real-AWS setup, and the deploy script
+[`infra/deploy_lambda.sh`](infra/deploy_lambda.sh) is the same for both. The
+Lambda's IAM policy allows only its three S3 prefixes, and its trigger listens
+to `incoming/` only, otherwise it would trigger itself in a loop.
 
-**Airflow dates mean business dates.** A `CronDataIntervalTimetable` makes the
-run at 07:00 on 2 October carry logical date 1 October, the day whose files
-arrived overnight. DAGs are thin; logic lives in `savehub` and is tested
-without Airflow.
+### Warehouse behind a small interface
+[`warehouse.py`](src/savehub/warehouse.py) exposes `execute`, `query` and
+`transaction`. DuckDB runs locally and in CI (fast, free, no account); Snowflake
+is selected with `WAREHOUSE=snowflake`. All SQL lives in [`sql/`](sql/) and uses
+only syntax both engines accept.
 
-## Tests
+### Airflow dates are business dates
+A `CronDataIntervalTimetable` gives the run at 07:00 on 2 October the logical
+date 1 October: the day whose files arrived overnight. DAG files only define
+schedule, retries and order; the logic lives in plain Python functions that are
+tested without Airflow.
 
-| Level | What | Runs |
+## Testing
+
+| Level | What it proves | How it runs |
 |---|---|---|
-| Business rules | validation, revenue, payouts, invoices: exact `Decimal` comparisons | `uv run pytest` (DuckDB in memory, moto for S3) |
-| Reconciliation | 12 tests, each breaks the data one way and expects the check to catch it | same |
-| End to end | upload to LocalStack S3, the deployed Lambda sorts the files | `pytest -m integration` |
-| DAGs | both DAGs import in the real Airflow image | CI, [scripts/check_dags.py](scripts/check_dags.py) |
+| Business rules | Validation, revenue, payouts and invoices match an independent `Decimal` calculation **exactly** | `uv run pytest`: DuckDB in memory, [moto](https://github.com/getmoto/moto) for S3 |
+| Idempotency and backfill | Re-runs and out-of-order backfills give identical rows | same |
+| Reconciliation | Each of 12 tests breaks the data in one realistic way and expects the check to catch it | same |
+| End to end | A file uploaded to S3 is sorted by the deployed Lambda | `pytest -m integration` against LocalStack |
+| DAGs | Both DAGs import in the real Airflow image | [CI](.github/workflows/ci.yml), [`check_dags.py`](scripts/check_dags.py) |
 
-CI: [.github/workflows/ci.yml](.github/workflows/ci.yml) runs ruff, the unit
-tests and the DAG import check.
+CI runs ruff, all unit tests and the DAG import check on every push.
+
+## Operations
+
+[`docs/runbook.md`](docs/runbook.md) covers rejected and missing files, missing
+rates or partners, backfills, reconciliation failures and health checks.
+Failure messages say what went wrong and what to do next, for example
+`2026-10-05: no validated file for bank(s) beta. Check s3://…/rejected/ for an
+.error.txt, or wait for the bank to deliver.`
 
 ## Limitations
 
-- **365-day year**, leap years included.
-- **One bank per customer, a fixed customer base**, one currency, one legal entity.
-- **Partner shares have no history.** Bank rates do (`valid_from`); partner
-  shares would need the same before the first contract change.
-- **No corrections after invoicing.** If data changes after an invoice was
-  sent, re-running overwrites the document; real billing issues a credit note.
-- **Invoice numbers are not sequential.** German invoices need a gapless
-  sequence; deterministic ids were chosen for idempotent re-runs.
-- **Lambda failures can be lost:** after Lambda's retries the event is gone. A
-  dead-letter queue and an alert would fix this.
-- **Files are read into memory** (fine for daily bank files, not for gigabytes),
-  and loads use row inserts, not `COPY INTO` from a stage.
-- LocalStack's free plan keeps no data across restarts; the generator
-  re-creates identical data.
+Deliberate simplifications, each with what a production version would do:
 
-## Next steps
+| Simplification | In production |
+|---|---|
+| 365-day year, leap years included | Day-count convention from the bank contract |
+| One currency, one legal entity, one bank per customer | Currency and entity on every row; FX rates with history |
+| Partner shares have no history (bank rates do, via `valid_from`) | `valid_from` on partner contracts too |
+| Data changed after invoicing overwrites the document | Credit notes and adjustment lines; sent documents are immutable |
+| Deterministic invoice ids, not a gapless sequence | Sequential invoice numbers, as German invoicing law requires |
+| A Lambda event can be lost after its retries | Dead-letter queue with an alert |
+| Files read into memory, rows inserted one batch at a time | `COPY INTO` from an S3 stage for Snowflake |
 
-Deliberately out of scope: multiple currencies and legal entities, late-data
-corrections (adjustment lines and credit notes), a web UI, NetSuite
-integration, Kubernetes. Smaller ones: a DLQ for the Lambda, partner share
-history, `COPY INTO` for Snowflake loads, alerting on failed tasks.
+**Next steps:** run on Snowflake, alerting on failed tasks, partner share
+history, a dead-letter queue for the Lambda.
 
-## Repository map
+## Repository layout
 
 ```
-dags/            daily_revenue.py, monthly_invoices.py (thin)
-src/savehub/     generator, warehouse interface, daily and monthly steps
-sql/             schema.sql, daily/*.sql, monthly/*.sql
-lambdas/         validate_bank_file/validate.py (zipped alone)
-infra/           deploy_lambda.sh + IAM policies (LocalStack and AWS)
-localstack/init/ creates the bucket and deploys the Lambda on startup
-seeds/           bank_rates.csv, partners.csv (reference data, with history)
-tests/           unit, specification and integration tests
-docs/            runbook.md, reconciliation_task.md
-.cursor/         project rules + a /scaffold-dag command
+dags/              daily_revenue.py, monthly_invoices.py      schedule and order only
+src/savehub/       generator, warehouse interface, daily and monthly steps
+sql/               schema.sql, daily/*.sql, monthly/*.sql     all warehouse SQL
+lambdas/           validate_bank_file/validate.py             deployed as one file
+infra/             deploy_lambda.sh, IAM policies             same for LocalStack and AWS
+localstack/init/   creates the bucket and deploys the Lambda on startup
+seeds/             bank_rates.csv, partners.csv               reference data with history
+tests/             unit, reconciliation and integration tests
+docs/              runbook.md, reconciliation_task.md
+.cursor/           project rules and a /scaffold-dag command for AI-assisted work
 ```
+
+<!-- TODO: screenshots (Airflow grid for October, Snowflake query) once step 6 is done -->
