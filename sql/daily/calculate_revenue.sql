@@ -18,7 +18,10 @@ SELECT
     b.balance_eur,
     r.annual_fee_rate,
     r.daily_fee_rate,
-    b.balance_eur * r.daily_fee_rate AS revenue_eur
+    -- Exact product needs 2 + 12 = 14 decimals. Snowflake caps the scale of a
+    -- product at max(scale1, scale2, 12) and would silently round to 12; giving
+    -- the rate scale 14 lifts that cap. DuckDB is exact either way.
+    b.balance_eur * CAST(r.daily_fee_rate AS NUMERIC(20, 14)) AS revenue_eur
 FROM balances AS b
 JOIN (
     SELECT

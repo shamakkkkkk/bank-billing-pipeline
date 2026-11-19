@@ -17,7 +17,9 @@ SELECT
     d.customer_id,
     d.revenue_eur,
     p.revenue_share,
-    d.revenue_eur * p.revenue_share AS payout_eur
+    -- Exact product needs 14 + 4 = 18 decimals; Snowflake would round to
+    -- max(14, 4, 12) = 14 without the cast (see calculate_revenue.sql).
+    CAST(d.revenue_eur AS NUMERIC(33, 18)) * p.revenue_share AS payout_eur
 FROM daily_revenue AS d
 JOIN partners AS p
     ON p.partner_id = d.partner_id

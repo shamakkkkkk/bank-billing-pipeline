@@ -10,6 +10,10 @@ alwaysApply: false
 - Start with a comment: what the query produces, its parameters in order, and
   any business rule it encodes.
 - Money columns: `NUMERIC`. No division of money (DuckDB returns DOUBLE).
+- Multiplying NUMERICs: Snowflake caps the result scale at max(s1, s2, 12) and
+  rounds silently. If the exact product needs more decimals, CAST one factor to
+  that scale (see `calculate_revenue.sql`). `pytest -m snowflake` catches misses.
+- No DDL (CREATE, ALTER) inside `wh.transaction()`: Snowflake commits on DDL.
 - No rounding outside `sql/monthly/create_*.sql`.
 - `INSERT` queries list their target columns explicitly.
 - Inner joins can drop rows silently: when a join must not lose rows, the Python

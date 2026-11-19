@@ -7,7 +7,7 @@ balance files, the pipeline turns them into **monthly invoices for banks** and
 **payout statements for referral partners**, and refuses to export anything
 that does not reconcile to the cent.
 
-**Python · SQL · Apache Airflow 3 · AWS S3 + Lambda (LocalStack) · DuckDB · pytest · GitHub Actions**
+**Python · SQL · Apache Airflow 3 · Snowflake · DuckDB · AWS S3 + Lambda (LocalStack) · pytest · GitHub Actions**
 
 ---
 
@@ -18,8 +18,8 @@ that does not reconcile to the cent.
 | **Problem** | Turn ~100 customers' daily balances at 3 banks into correct invoices and partner payouts, every day and every month, despite late or broken files |
 | **Revenue rule** | Each bank pays a yearly fee on deposits (0.3 / 0.5 / 0.7 %), accrued daily: `balance × rate / 365`. Referral partners get 20 % or 15 % of the revenue from customers they brought |
 | **Data** | Simulated by a deterministic generator (fictional platform "SaveHub", EUR only). It can also produce five kinds of broken file on purpose |
-| **Result** | October 2026 runs end to end: 93 bank files → 3,100 revenue rows → 3 invoices, 2 partner statements, exported as CSV |
-| **Tests** | 97 unit tests + an end-to-end test against LocalStack, all green, CI on every push |
+| **Result** | October 2026 runs end to end on **Snowflake** and on DuckDB, with identical results to the last decimal: 93 bank files → 3,100 revenue rows → 3 invoices, 2 partner statements, exported as CSV |
+| **Tests** | 97 unit tests, an end-to-end test against LocalStack, and a DuckDB-vs-Snowflake parity test; CI on every push |
 
 **Where to look first**
 
@@ -37,7 +37,7 @@ flowchart LR
     L["Lambda<br/>validate file"]
     V["S3<br/>validated/YYYY-MM-DD/"]
     R["S3 rejected/<br/>+ .error.txt"]
-    W[("Warehouse<br/>DuckDB")]
+    W[("Warehouse<br/>Snowflake · DuckDB")]
     OUT["S3<br/>invoices/ · statements/"]
 
     subgraph D["Airflow · daily_revenue · 07:00 for the previous day"]
@@ -147,6 +147,16 @@ uv run pytest                                  # 97 tests, no Docker needed
 uv run --env-file .env pytest -m integration   # upload to S3, Lambda sorts it
 ```
 
+**On Snowflake** (optional, a free trial account is enough):
+
+```bash
+scripts/snowflake_setup.sh                     # key pair + setup SQL with the public key
+uv run --env-file .env python scripts/snowflake_admin_setup.py   # runs it as admin (password prompt)
+# set SNOWFLAKE_ACCOUNT and WAREHOUSE=snowflake in .env, then
+docker compose up -d airflow                   # the DAGs now write to Snowflake
+uv run --env-file .env pytest -m snowflake     # parity test: DuckDB vs Snowflake
+```
+
 ## Design decisions
 
 ### Money is never a float
@@ -204,13 +214,30 @@ to `incoming/` only, otherwise it would trigger itself in a loop. Tested against
 LocalStack; the real-AWS path is configuration only and has not been run against
 an AWS account.
 
-### Warehouse behind a small interface
+### One codebase, two warehouses: Snowflake and DuckDB
 [`warehouse.py`](src/savehub/warehouse.py) exposes `execute`, `query` and
-`transaction`; nothing else in the code talks to the database directly. Today it
-runs on DuckDB (fast, free, no account, ideal for CI). The SQL in [`sql/`](sql/)
-sticks to portable syntax (`?` parameters, CTEs, window functions, no money
-division) so that a Snowflake adapter is one new class selected by
-`WAREHOUSE=snowflake`, not a rewrite. That adapter is the next step.
+`transaction`; nothing else talks to a database directly. `WAREHOUSE=snowflake`
+runs the pipeline on Snowflake, `WAREHOUSE=duckdb` on a local file (fast, free,
+used by the 97 unit tests and CI). The same `.sql` files run on both.
+
+A parity test runs October on both engines and compares all five tables value by
+value ([`test_snowflake.py`](tests/integration/test_snowflake.py)). It found two
+real differences, both fixed:
+
+- **Snowflake silently rounds products.** The scale of `a × b` is capped at
+  `max(scale_a, scale_b, 12)`: `balance(…,2) × rate(…,12)` came back with 12
+  decimals instead of the exact 14. Invoices still matched in cents, but that is
+  a hidden second rounding. An explicit `CAST` on one factor lifts the cap.
+  → [`calculate_revenue.sql`](sql/daily/calculate_revenue.sql)
+- **DDL commits an open transaction in Snowflake.** Creating the month's temp
+  table inside the delete-and-insert transaction would have broken its
+  atomicity, so it is created before the transaction starts.
+  → [`monthly.py`](src/savehub/monthly.py) `set_billing_period`
+
+Snowflake setup is code too ([`infra/snowflake_setup.sql`](infra/snowflake_setup.sql)):
+an XSMALL warehouse that suspends after 60 s, a resource monitor that stops it at
+10 credits, and a least-privilege role for a **service user that logs in with a
+key pair**, no password.
 
 ### Airflow dates are business dates
 A `CronDataIntervalTimetable` gives the run at 07:00 on 2 October the logical
@@ -226,6 +253,7 @@ tested without Airflow.
 | Idempotency and backfill | Re-runs and out-of-order backfills give identical rows | same |
 | Reconciliation | Each of 12 tests breaks the data in one realistic way and expects the check to catch it | same |
 | End to end | A file uploaded to S3 is sorted by the deployed Lambda | `pytest -m integration` against LocalStack |
+| Warehouse parity | October on Snowflake equals October on DuckDB, every value in every table | `pytest -m snowflake` (a real account, a few cents of credits) |
 | DAGs | Both DAGs import in the real Airflow image | [CI](.github/workflows/ci.yml), [`check_dags.py`](scripts/check_dags.py) |
 
 CI runs ruff, all unit tests and the DAG import check on every push.
@@ -252,7 +280,7 @@ Deliberate simplifications, each with what a production version would do:
 | A Lambda event can be lost after its retries | Dead-letter queue with an alert |
 | Files read into memory, rows inserted one batch at a time | `COPY INTO` from an S3 stage for Snowflake |
 
-**Next steps:** a Snowflake adapter for the warehouse interface, alerting on
+**Next steps:** `COPY INTO` loads from an S3 stage on Snowflake, alerting on
 failed tasks, partner share history, a dead-letter queue for the Lambda.
 
 ## Repository layout
@@ -263,6 +291,7 @@ src/savehub/       generator, warehouse interface, daily and monthly steps
 sql/               schema.sql, daily/*.sql, monthly/*.sql     all warehouse SQL
 lambdas/           validate_bank_file/validate.py             deployed as one file
 infra/             deploy_lambda.sh, IAM policies             same for LocalStack and AWS
+                   snowflake_setup.sql                        warehouse, cost cap, role, service user
 localstack/init/   creates the bucket and deploys the Lambda on startup
 seeds/             bank_rates.csv, partners.csv               reference data with history
 tests/             unit, reconciliation and integration tests
@@ -270,4 +299,4 @@ docs/              runbook.md, reconciliation.md
 .cursor/           project rules and a /scaffold-dag command for AI-assisted work
 ```
 
-<!-- TODO: screenshots (Airflow grid for October, Snowflake query) once running on Snowflake -->
+<!-- TODO: screenshots (Airflow grid for October, Snowflake query) -->
