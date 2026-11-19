@@ -119,9 +119,10 @@ ReconciliationFailed: 2026-10: 1 problem(s), nothing exported:
 
 ## Run it locally
 
-Requirements: Docker with 5 GB memory, [uv](https://docs.astral.sh/uv/), and a
+Requirements: Docker with 5 GB memory, [uv](https://docs.astral.sh/uv/), a
 free [LocalStack](https://app.localstack.cloud) "Hobby" auth token (no AWS
-account needed).
+account needed), and optionally the AWS CLI v2 to look into S3. About 15 minutes
+from clone to exported invoices.
 
 ```bash
 # 1. Start Airflow, Postgres and LocalStack. LocalStack creates the S3 bucket
@@ -140,17 +141,35 @@ docker compose exec airflow airflow backfill create --dag-id daily_revenue \
     --from-date 2026-10-01 --to-date 2026-11-01
 ```
 
-Two October days fail on purpose: their bank file was rejected. Fixing them is
-a realistic incident, described in [the runbook](docs/runbook.md) (section 1).
-Unpausing also schedules the regular run for yesterday, which waits for
-yesterday's files (`generate.py --date YYYY-MM-DD`).
+29 days turn green. Two fail on purpose: their bank file was rejected, and
+`load` reports which bank is missing. This is the incident described in
+[the runbook](docs/runbook.md) (section 1). See why a file was rejected, then
+play the bank sending a corrected file:
 
-Once all October days are green, unpause `monthly_invoices` and run October:
+```bash
+set -a; source .env; set +a       # the CLI now uses LocalStack, like the pipeline
+aws s3 ls s3://savehub-bank-files/rejected/
+aws s3 cp s3://savehub-bank-files/rejected/bank_beta_2026-10-05.csv.error.txt -
+
+uv run --env-file .env generate.py --date 2026-10-05   # corrected files
+uv run --env-file .env generate.py --date 2026-10-28
+```
+
+Then click **Clear** on the two failed `load` tasks in the UI (or wait for the
+retry). Unpausing the DAG also schedules the regular run for yesterday; it
+needs yesterday's files the same way (`generate.py --date <yesterday>`).
+
+Once all October days are green, run October's invoices:
 
 ```bash
 docker compose exec airflow airflow backfill create --dag-id monthly_invoices \
     --from-date 2026-10-01 --to-date 2026-11-01
 ```
+
+and unpause `monthly_invoices` in the UI. Unpausing also schedules the last
+completed calendar month; if that is not October, that run fails with
+`MonthIncomplete`, which is the completeness check doing its job. The CSVs
+appear in `s3://savehub-bank-files/invoices/2026-10/` and `statements/2026-10/`.
 
 Tests:
 

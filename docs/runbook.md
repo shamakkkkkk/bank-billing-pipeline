@@ -1,10 +1,12 @@
 # Runbook
 
-What to do when something in the billing pipeline fails. Commands assume the
-local stack (`docker compose up -d`); on real AWS drop `--endpoint-url`.
+What to do when something in the billing pipeline fails. Commands use the
+AWS CLI v2 and assume the local stack (`docker compose up -d`). Load `.env`
+first: the CLI then talks to LocalStack with the same endpoint and credentials
+as the pipeline. On real AWS, load `.env.aws` instead; no command changes.
 
 ```bash
-S3="aws --endpoint-url http://localhost:4566 s3"
+set -a; source .env; set +a
 BUCKET=s3://savehub-bank-files
 ```
 
@@ -27,14 +29,15 @@ with `MissingBankFiles: ... no validated file for bank(s) beta`.
 
 1. Read the reason:
    ```bash
-   $S3 ls $BUCKET/rejected/
-   $S3 cp $BUCKET/rejected/bank_beta_2026-10-05.csv.error.txt -
+   aws s3 ls $BUCKET/rejected/
+   aws s3 cp $BUCKET/rejected/bank_beta_2026-10-05.csv.error.txt -
    ```
 2. **Do not edit the file yourself.** The bank is the source of the data: ask
    the bank to send a corrected file with the same name. (Exception, agreed in
    writing with the bank: an obvious format issue such as a decimal comma.)
 3. The corrected file goes to `incoming/` (the bank uploads it, or
-   `$S3 cp bank_beta_2026-10-05.csv $BUCKET/incoming/`). The Lambda validates it
+   `aws s3 cp bank_beta_2026-10-05.csv $BUCKET/incoming/`; in the local
+   simulation `uv run --env-file .env generate.py --date 2026-10-05`). The Lambda validates it
    within seconds and removes the old entry from `rejected/`.
 4. The `load` task retries by itself (2 retries, 15 min apart). Not waiting:
    in the UI, open the failed `load` task and click **Clear** (with
