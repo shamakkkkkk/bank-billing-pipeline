@@ -71,6 +71,18 @@ flowchart LR
 | **Invoices, statements** (monthly) | One document per bank and per partner | Rounded to cents exactly once |
 | **Reconcile** (monthly) | Recomputes every amount from the daily data | Any difference, even 0.01 €, blocks the export |
 
+## Running
+
+The daily DAG in Airflow: one run per business day, four idempotent tasks,
+no failures.
+
+![Airflow: daily_revenue runs, all tasks green](docs/images/airflow-daily-revenue.png)
+
+October's invoices in Snowflake, written by the pipeline: the exact sum next to
+the amount rounded once to cents.
+
+![Snowflake: October 2026 invoices](docs/images/snowflake-invoices.png)
+
 ## What it produces
 
 An invoice, exported to `s3://…/invoices/2026-10/INV-2026-10-ALPHA.csv`:
@@ -299,4 +311,3 @@ docs/              runbook.md, reconciliation.md
 .cursor/           project rules and a /scaffold-dag command for AI-assisted work
 ```
 
-<!-- TODO: screenshots (Airflow grid for October, Snowflake query) -->
